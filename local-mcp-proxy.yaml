@@ -1,0 +1,159 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Local MCP proxy: agentgateway in front of the hosted GitHub and Notion MCP servers.
+# The client's Authorization header is forwarded to the upstream as-is, so point your
+# MCP client at the gateway and authenticate exactly as you would against the upstream:
+#   GitHub: http://localhost:3000/github/mcp  (Authorization: Bearer <PAT or gh token>)
+#   Notion: http://localhost:3000/notion/mcp  (Authorization: Bearer <OAuth access token>)
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - name: github-mcp
+      matches:
+      - path:
+          exact: /github/mcp
+      policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+          - cache-control
+          - mcp-session-id
+          - authorization
+          exposeHeaders:
+          - mcp-session-id
+      backends:
+      - mcp:
+          targets:
+          - name: github
+            mcp:
+              host: https://api.githubcopilot.com/mcp/
+    # OAuth discovery for OAuth-only upstreams (e.g. Notion).
+    # The gateway serves RFC 9728 protected-resource metadata and proxies the
+    # upstream authorization server under /notion-as. Proxying the AS is required
+    # because MCP clients send `resource=<gateway URL>` (RFC 8707) and Notion's AS
+    # rejects unknown resources with invalid_target; the gateway rewrites the
+    # resource parameter to the upstream's canonical value in /authorize and /token.
+    - name: notion-oauth-metadata
+      matches:
+      - path:
+          exact: /.well-known/oauth-protected-resource/notion/mcp
+      policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+        directResponse:
+          status: 200
+          body: '{"resource":"http://localhost:3000/notion/mcp","authorization_servers":["http://localhost:3000/notion-as"],"bearer_methods_supported":["header"],"resource_name":"Notion MCP (via agentgateway)"}'
+          headers:
+            content-type: '"application/json"'
+    - name: notion-as-metadata
+      matches:
+      - path:
+          exact: /.well-known/oauth-authorization-server/notion-as
+      - path:
+          exact: /notion-as/.well-known/oauth-authorization-server
+      - path:
+          exact: /.well-known/openid-configuration/notion-as
+      - path:
+          exact: /notion-as/.well-known/openid-configuration
+      policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+        directResponse:
+          status: 200
+          body: '{"issuer":"http://localhost:3000/notion-as","authorization_endpoint":"http://localhost:3000/notion-as/authorize","token_endpoint":"http://localhost:3000/notion-as/token","registration_endpoint":"http://localhost:3000/notion-as/register","response_types_supported":["code"],"response_modes_supported":["query"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post","none"],"revocation_endpoint":"http://localhost:3000/notion-as/token","code_challenge_methods_supported":["plain","S256"],"client_id_metadata_document_supported":true}'
+          headers:
+            content-type: '"application/json"'
+    # The browser must reach Notion's /authorize directly (not via the proxy):
+    # its response sets a Domain=.notion.com state cookie that the /callback step
+    # later validates, and a cookie relayed through localhost is discarded by the
+    # browser. So redirect instead of proxying, rewriting `resource` in the URL.
+    - name: notion-as-authorize
+      matches:
+      - path:
+          exact: /notion-as/authorize
+      policies:
+        directResponse:
+          status: 302
+          headers:
+            location: '"https://mcp.notion.com" + request.pathAndQuery.setQuery("resource", "https://mcp.notion.com/mcp").replace("/notion-as/", "/")'
+    - name: notion-as-token
+      matches:
+      - path:
+          exact: /notion-as/token
+      policies:
+        urlRewrite:
+          authority:
+            full: mcp.notion.com
+          path:
+            full: /token
+        backendTLS: {}
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - content-type
+        transformations:
+          request:
+            body: 'string(request.body).regexReplace("resource=[^&]*", "resource=https%3A%2F%2Fmcp.notion.com%2Fmcp")'
+      backends:
+      - host: mcp.notion.com:443
+    - name: notion-as-register
+      matches:
+      - path:
+          exact: /notion-as/register
+      policies:
+        urlRewrite:
+          authority:
+            full: mcp.notion.com
+          path:
+            full: /register
+        backendTLS: {}
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - content-type
+      backends:
+      - host: mcp.notion.com:443
+    - name: notion-mcp
+      matches:
+      - path:
+          exact: /notion/mcp
+      policies:
+        cors:
+          allowOrigins:
+          - "*"
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+          - cache-control
+          - mcp-session-id
+          - authorization
+          exposeHeaders:
+          - mcp-session-id
+        # On upstream 401, point clients at the gateway-served resource metadata
+        # instead of the upstream's, so OAuth discovery stays consistent with the
+        # server URL the client connected to. On other responses the else-branch
+        # errors when the header is absent, which skips the mutation.
+        transformations:
+          response:
+            set:
+              www-authenticate: 'response.code == 401 ? "Bearer resource_metadata=\"http://localhost:3000/.well-known/oauth-protected-resource/notion/mcp\"" : response.headers["www-authenticate"]'
+      backends:
+      - mcp:
+          targets:
+          - name: notion
+            mcp:
+              host: https://mcp.notion.com/mcp
