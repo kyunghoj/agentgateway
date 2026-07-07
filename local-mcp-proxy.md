@@ -135,7 +135,7 @@ mcpAuthorization:
   - require: 'cidr("127.0.0.1/8").containsIP(source.address) || cidr("::1/128").containsIP(source.address)'
 ```
 
-참고 예제: `examples/authorization/` (README는 Cedar 스타일 `permit(...)` 문법을 보여주지만
+참고 예제: `examples/mcp-authorization/` (README는 Cedar 스타일 `permit(...)` 문법을 보여주지만
 config.yaml은 순수 CEL 불리언 규칙 — 둘 다 지원됨).
 
 ## 기타 참고
