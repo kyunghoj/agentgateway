@@ -94,6 +94,50 @@ directResponse:
 클라이언트 → /notion/mcp + Bearer 토큰 → 게이트웨이가 업스트림에 그대로 전달
 ```
 
+## 다음 단계 후보: mcpAuthorization 인가 정책 (미적용)
+
+라우트에 `mcpAuthorization` 정책을 얹어 도구 수준 접근 제어를 걸 수 있습니다. CEL 규칙 기반이며
+평가 순서는 (`crates/agentgateway/src/http/authorization.rs`의 `validate()`):
+
+1. `deny` 규칙이 하나라도 참 → 거부
+2. `require` 규칙이 있으면 전부 참이어야 함
+3. `allow` 규칙이 하나라도 참 → 허용
+4. 매칭 없음: allow 규칙이 하나도 없으면 기본 허용(denylist 모드), 있으면 기본 거부(allowlist 모드)
+
+문자열만 쓰면 allow 규칙입니다. `tools/list` 응답도 자동 필터링되어 차단된 도구는 클라이언트
+목록에서 아예 사라집니다.
+
+규칙에서 사용 가능한 컨텍스트: `mcp.tool.name` / `mcp.tool.target` / `mcp.tool.arguments`,
+`mcp.methodName`, `mcp.resource.*`, `mcp.prompt.*`, `request.headers`, `source.address`.
+`jwt.*` 클레임 규칙은 별도 `jwtAuth` 정책이 필요해서 opaque 토큰을 쓰는 현재 구성에는 해당 없음.
+
+테스트 후보 정책:
+
+```yaml
+# 1. 읽기 전용 allowlist (적용 즉시 Notion 도구 목록이 20개 → 4개로 줄어 효과 확인 쉬움)
+mcpAuthorization:
+  rules:
+  - 'mcp.tool.name in ["notion-search", "notion-fetch", "notion-get-users", "notion-get-teams"]'
+
+# 2. 파괴적 도구만 차단 (denylist)
+mcpAuthorization:
+  rules:
+  - deny: 'mcp.tool.name.startsWith("notion-create") || mcp.tool.name.startsWith("notion-update") || mcp.tool.name == "notion-move-pages"'
+
+# 3. 인자 기반 — GitHub 쓰기 도구를 본인 리포로 제한
+mcpAuthorization:
+  rules:
+  - deny: 'mcp.tool.name in ["create_or_update_file", "create_pull_request", "delete_file"] && mcp.tool.arguments.owner != "kyunghoj"'
+
+# 4. 요청 속성 기반 — 로컬 접속만 허용
+mcpAuthorization:
+  rules:
+  - require: 'cidr("127.0.0.1/8").containsIP(source.address) || cidr("::1/128").containsIP(source.address)'
+```
+
+참고 예제: `examples/authorization/` (README는 Cedar 스타일 `permit(...)` 문법을 보여주지만
+config.yaml은 순수 CEL 불리언 규칙 — 둘 다 지원됨).
+
 ## 기타 참고
 
 - MCP 백엔드는 라우트에 매칭된 어떤 경로든 streamable HTTP로 서빙합니다 (`/sse`만 legacy SSE).
