@@ -999,6 +999,14 @@ fn backend_auth_from_proto(
 			};
 			let assume_role = a.assume_role.map(|assume_role| auth::AwsAssumeRole {
 				role_arn: assume_role.role_arn,
+				session_name: if assume_role.session_name.is_empty() {
+					None
+				} else {
+					Some(assume_role.session_name)
+				},
+				tags: auth::aws::sorted_session_tags(
+					assume_role.tags.into_iter().map(|tag| (tag.key, tag.value)),
+				),
 			});
 			let aws_auth = match a.kind {
 				Some(proto::agent::aws::Kind::ExplicitConfig(config)) => {
